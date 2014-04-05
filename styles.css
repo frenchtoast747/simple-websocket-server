@@ -1,0 +1,91 @@
+*{
+    box-sizing: border-box
+}
+
+body{
+    background-color: #224E6B;
+}
+
+#wrapper{
+    width: 950px;
+    margin: 0 auto;
+}
+
+.right{
+    float:right;
+}
+
+#chat-container{
+    min-height: 400px;
+    background-color: #fff;
+    padding: 20px;
+    -webkit-box-shadow: inset 0 0 15px 0 #D9D9D9;
+    box-shadow: inset 0 0 15px 0 #D9D9D9;
+}
+
+#enter-chat{
+    width:100%;
+    height:50px;
+    padding:0 15px;
+}
+
+#enter-chat:focus{
+    border:0px;
+    -webkit-box-shadow: inset 0 0 10px 0 #1696ca;
+    box-shadow: inset 0 0 10px 0 #1696ca;
+}
+
+#form-container{
+    padding-right:99px;
+    position: relative;
+    margin-bottom: 15px;
+}
+
+#form-container input[type="submit"]{
+    width:100px;
+    position: absolute;
+    right: 0;
+    top:0;
+    height: 50px;
+    background-color: #66C979;
+    border: #519f51 outset;
+    color: #fff;
+    font-size: 15pt;
+    cursor: pointer;
+}
+
+ul{
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+}
+
+#chat-container li{
+    padding: 10px 0;
+    border-bottom: 1px solid #333;
+}
+
+#chat-container li:first-child{
+    border-top: 1px solid #333;
+}
+
+#chat-container li:nth-child(odd){
+    background-color: #fcfcfc;
+}
+
+#status{
+    color:#fff;
+    padding:10px;
+}
+
+#status.connecting {
+    background-color: #0d5bde;
+}
+
+#status.connected{
+    background-color: #30bc31;
+}
+
+#chat-app{
+    display: none;
+}
