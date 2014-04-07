@@ -1,4 +1,5 @@
 var socket;
+var port = '8002';
 
 function start_chatting(e){
   e.preventDefault();
@@ -14,7 +15,7 @@ function start_chatting(e){
   status.innerHTML = 'Connecting...';
   status.className = 'connecting';
 
-  socket = new WebSocket('ws://localhost:8002/');
+  socket = new WebSocket('ws://localhost:'+port+'/');
 
   socket.onopen = function () {
     status.innerHTML = 'Connected'
