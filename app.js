@@ -1,51 +1,72 @@
 var socket;
-var host = 'localhost';
-var port = '8002';
 
-function start_chatting(e){
-  e.preventDefault();
-  var username = document.getElementById('username').value;
-  var connect_form = document.getElementById('connect-form');
-  var chat_app = document.getElementById('chat-app');
+(function(window, document, undefined){
+    "use strict";
+    var host = document.location.hostname;
+    var port = document.location.port;
 
-  connect_form.style.display = 'none';
+    function start_chatting(e) {
+        e.preventDefault();
+        var username = document.getElementById('username').value;
+        var connect_form = document.getElementById('connect-form');
+        var chat_app = document.getElementById('chat-app');
 
-  var status = document.getElementById('status');
-  var chats = document.getElementById('chats');
+        connect_form.style.display = 'none';
 
-  status.innerHTML = 'Connecting...';
-  status.className = 'connecting';
+        var status = document.getElementById('status');
+        var chats = document.getElementById('chats');
 
-  socket = new WebSocket('ws://'+host+':'+port+'/');
+        status.innerHTML = 'Connecting...';
+        status.className = 'connecting';
 
-  socket.onopen = function () {
-    status.innerHTML = 'Connected'
-    status.className = 'connected';
-    chat_app.style.display = 'block';
-    socket.send(username)
-  };
+        socket = new WebSocket('ws://' + host + ':' + port + '/');
 
-  socket.onmessage = function (message) {
-    var li = document.createElement('li');
-    li.innerHTML = message.data;
-    chats.appendChild(li);
-  };
+        socket.onopen = function () {
+            status.innerHTML = 'Connected';
+            status.className = 'connected';
+            chat_app.style.display = 'block';
+            send_message({
+                type: 'new_user',
+                username: username
+            });
+        };
 
-  function handle_input(e) {
-    e.preventDefault();
-    var chat_input = document.getElementById('enter-chat');
-    socket.send(chat_input.value);
-    chat_input.value = '';
-  }
+        socket.onmessage = function (response) {
+            var tr = document.createElement('tr');
+            var data = JSON.parse(response.data);
+            console.log(data);
+            if(data.type === 'notice') {
+                data.username = '*Server Message*'
+            }
+            tr.innerHTML = '<td>[$1]</td><td>$2</td><td>$3</td>'
+                .replace('$1', data.datetime)
+                .replace('$2', data.username)
+                .replace('$3', data.message);
+            chats.appendChild(tr);
+        };
 
-  var submit = document.getElementById('submit');
-  submit.addEventListener('click', handle_input);
-  var my_form = document.getElementById('my-form');
-  my_form.addEventListener('submit', handle_input);
-}
+        function handle_input(e) {
+            e.preventDefault();
+            var chat_input = document.getElementById('enter-chat');
+            send_message({
+                type: 'user_message',
+                message: chat_input.value
+             });
+            chat_input.value = '';
+        }
 
+        var submit = document.getElementById('submit');
+        submit.addEventListener('click', handle_input);
+        var my_form = document.getElementById('my-form');
+        my_form.addEventListener('submit', handle_input);
+    }
 
-window.onload = function(){
-  var start_chat_form = document.getElementById('start-chat-form');
-  start_chat_form.addEventListener('submit', start_chatting);
-};
+    function send_message(data){
+        socket.send(JSON.stringify(data));
+    }
+
+    window.onload = function () {
+        var start_chat_form = document.getElementById('start-chat-form');
+        start_chat_form.addEventListener('submit', start_chatting);
+    };
+})(window, document);

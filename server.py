@@ -1,14 +1,16 @@
 import array
-import re
-import socket
+import json
+import logging
+import os
 import struct
-import threading
 
-from hashlib import sha1
 from base64 import b64encode
-
-
-SEC_KEY = re.compile(r'Sec-WebSocket-Key: (?P<key>.*)\r\n', re.IGNORECASE)
+from BaseHTTPServer import HTTPServer
+from SimpleHTTPServer import SimpleHTTPRequestHandler
+from hashlib import sha1
+from SocketServer import ThreadingMixIn
+from urlparse import urlparse
+import datetime
 
 HOST = ''
 PORT = 8002
@@ -17,115 +19,82 @@ MAGIC_STRING = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 client_pool = set()
 ID = 1
+logger = logging.getLogger(__name__)
 
+class WebSocketHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        self.websocket_mode = False
+        SimpleHTTPRequestHandler.__init__(self, *args, **kwargs)
 
-class WebSocketConnection(object):
+    def do_GET(self):
+        if (self.headers.dict.get('connection') == 'Upgrade'
+            and self.headers.dict.get('upgrade', '').lower() == 'websocket'):
+            logger.info('Upgrading HTTP to websocket connection')
+            self.websocket_mode = True
+            self.websocket_handshake()
+            return self.serve()
 
-    def __init__(self, sock):
-        self.id = ID
-        self.frame = None
-        self.socket = sock
+        if self.path == '/':
+            self.path = '/index.html'
+        path = os.path.abspath(os.path.dirname(self.server.index_file))
+        path = os.path.normpath(path + self.path)
+        path = urlparse(path).path
+        if not os.path.exists(path):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', self.guess_type(path))
+        self.end_headers()
+        with open(path) as f:
+            self.wfile.write(f.read())
 
-    def handshake(self):
-        data = self.socket.recv(CHUNKSZ)
-        try:
-            search = SEC_KEY.search(data)
-            key = search.groupdict()['key']
-        except KeyError:
-            return False
+    def finish(self):
+        # when in websocket mode, don't close the connection.
+        # This will block the server if it doesn't use the ThreadingMixIn
+        if not self.websocket_mode:
+            SimpleHTTPRequestHandler.finish(self)
+
+    def websocket_handshake(self):
+        secret_key = self.headers.dict.get('sec-websocket-key', '')
         hash = sha1()
-        hash.update(key + MAGIC_STRING)
+        hash.update(secret_key + MAGIC_STRING)
         accept = b64encode(hash.digest())
-        # construct the response
-        response = 'HTTP/1.1 101 Switching Protocols\r\n'
-        response += 'Upgrade: websocket\r\n'
-        response += 'Connection: Upgrade\r\n'
-        response += 'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n'
-        # send it
-        self.socket.send(response)
-        # the client should send the name of the user
-        self.username = self.get_message()
-        self.sendall(self.username + ' has connected.', include_self=True)
+        response = [
+            'HTTP/1.1 101 Switching Protocols',
+            'Upgrade: websocket',
+            'Connection: Upgrade',
+            'Sec-WebSocket-Accept: ' + accept,
+            '', '',
+        ]
+        self.request.sendall('\r\n'.join(response))
 
-
-    def get_message(self):
-        self.frame = Frame(self.socket.recv(2))
-        if not self.frame.data:
-            return
-        mask = None
-        if self.frame.payload_sz == 126:
-            data = self.socket.recv(2)
-            self.frame.payload_sz = struct.unpack('!H', data)[0]
-        elif self.frame.payload_sz == 127:
-            # client has hacked the client code,
-            # just play it safe and end the connection
-            return
-            # data = self.socket.recv(8)
-            # self.frame.payload_sz = struct.unpack('!Q', data)[0]
-        if self.frame.has_mask:
-            mask = self.socket.recv(4)
-        data = self.socket.recv(self.frame.payload_sz)
-        message = self.handle_mask(mask, data)
-        return message
+    def handle_data(self, data):
+        raise NotImplementedError()
 
     def serve(self):
         while True:
-            message = self.get_message()
-
-            if message is None or message == '\x03\xE9':
+            data = Frame.unpack(self.connection)
+            if data is None or data == '\x03\xE9':
                 self.quit()
                 break
-            message = self.username + ': ' + message
-            print message
-            # send the same frame received to all other clients
-            self.sendall(message, include_self=True)
-        print "%s has quit." % self.username
+            self.handle_data(data)
 
     def quit(self):
-        self.sendall(self.username + ' has quit.')
-        client_pool.remove(self)
-        self.socket.close()
-
-    def create_frame(self, message):
-        sz = len(message)
-        fin = 0x80
-        opcode = 0x01
-        values = [fin|opcode]
-        fmt_str = 'BB'
-        if 125 < sz <= 2**16:
-            # 126 says to check the next 2 bytes for the payload sz
-            values.append(126)
-            fmt_str += 'H'
-        elif sz > 2**16:
-            # this shouldn't happen because I don't want to support that
-            # much data in a simple chat client
-            return
-        # the server doesn't need to send a MASK bit, so it's ignored as a 0 value
-        # add the payload sz
-        values.append(sz)
-        # to add a character pointer, it requires a size
-        fmt_str += str(sz) + 's'
-        values.append(message.encode('utf-8'))
-        return struct.pack(fmt_str, *values)
-
+        self.request.close()
 
     def send(self, data):
-        self.socket.send(data)
+        self.write(data)
 
-    def sendall(self, message, include_self=False):
-        frame = self.create_frame(message)
-        for client in client_pool:
-            if include_self or client is not self:
-                client.send(frame)
+    def write(self, data):
+        if isinstance(data, (list, tuple, set, dict)):
+            data = json.dumps(data)
+        data = data.strip()
+        if data:
+            self.wfile.write(Frame.pack(data))
+            self.wfile.flush()
 
-    def handle_mask(self, mask, data):
-        if mask is None:
-            return data
-        mask = array.array('B', mask)
-        data = array.array('B', data)
-        for idx, old_byte in enumerate(data):
-            data[idx] = old_byte ^ mask[idx % 4]
-        return data.tostring()
+    def flush(self):
+        self.wfile.flush()
 
 
 class Frame(object):
@@ -151,64 +120,140 @@ class Frame(object):
         |                     Payload Data continued ...                |
         +---------------------------------------------------------------+
     """
-    def __init__(self, data):
-        self.data = data
-        if data:
-            unpacked = struct.unpack('BB', data)
-            self.fin = unpacked[0] & 0x80
-            self.opcode = unpacked[0] & 0x0f
-            self.payload_sz = unpacked[1] & 0x7f
-            self.has_mask = bool(unpacked[1] & 0x80)
+    OP_CONTINUE = 0x0
+    OP_TEXT      = 0x1
+    OP_BINARY    = 0x2
+
+    @staticmethod
+    def unpack(socket):
+        data = socket.recv(2)
+        unpacked = struct.unpack('BB', data)
+        fin = unpacked[0] & 0x80
+        rsv1 = unpacked[0] & 0x40
+        rsv2 = unpacked[0] & 0x20
+        rsv3 = unpacked[0] & 0x10
+        opcode = unpacked[0] & 0x0f
+        payload_sz = unpacked[1] & 0x7f
+        has_mask = bool(unpacked[1] & 0x80)
+
+        if payload_sz == 126:
+            payload_sz = socket.recv(2)
+            payload_sz = struct.unpack('!H', payload_sz)[0]
+        elif payload_sz == 127:
+            raise Exception('TODO: handle data larger than 2**16 bytes.')
+        mask = None
+        if has_mask:
+            mask = socket.recv(4)
+        data = socket.recv(payload_sz)
+        data = Frame.unmask(mask, data)
+        return data
+
+    @staticmethod
+    def unmask(mask, data):
+        if mask is None:
+            return data
+        mask = array.array('B', mask)
+        data = array.array('B', data)
+        for idx, old_byte in enumerate(data):
+            data[idx] = old_byte ^ mask[idx % 4]
+        return data.tostring()
+
+    @staticmethod
+    def pack(data, fin=1, rsv1=0, rsv2=0, rsv3=0, opcode=OP_TEXT):
+        header = b''
+        sz = len(data)
+        header += struct.pack(
+            '!B', (
+              (fin << 7)
+            | (rsv1 << 6)
+            | (rsv2 << 5)
+            | (rsv3 << 4)
+            | opcode
+            )
+        )
+        # ignore the mask bit since it's not required by the server
+        if sz < 126:
+            header += struct.pack('!B', sz)
+        elif sz <= 2 ** 16:
+            # 126 says to check the next 2 bytes for the payload sz
+            header += struct.pack('!B', 126) + struct.pack('!H', sz)
+        elif sz > 2 ** 16:
+            header += struct.pack('!B', 127) + struct.pack('!Q', sz)
+
+        data = data.encode('utf-8')
+        return header + data
 
 
-def handle_new_client(sock):
-    global ID
-    # import sys
-    # sys.path.append(
-    #     r'C:\Program Files (x86)\JetBrains\PyCharm 3.0.2\helpers\pydev\pydevd.py')
-    # sys.path.append(
-    #     r'C:\Program Files (x86)\JetBrains\PyCharm 3.0.2\pycharm-debug.egg')
-    # import pydevd
-    #
-    # pydevd.settrace('localhost', port=9090, stdoutToServer=True,
-    #                 stderrToServer=True)
-    client = WebSocketConnection(sock)
-    ID += 1
-    client_pool.add(client)
-    try:
-        client.handshake()
-        client.serve()
-    except Exception as e:
-        print e
-        client.quit()
+class Client(object):
+    _ID = 1
+    def __init__(self, username, handler):
+        self.username = username
+        self.connection = handler
+
+        self.ID = self._ID
+        self._ID += 1
 
 
-def serve():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind((HOST, PORT))
-    s.listen(1)
-    print 'Listening on', HOST, PORT
-    while True:
-        sock, addr = s.accept()
-        if len(client_pool) < 10:
-            print 'Client %s has connected:' % ID, addr
-            t = threading.Thread(target=handle_new_client, args=(sock,))
-            t.daemon = False
-            t.start()
 
-TEST_HEADER = """GET / HTTP/1.1
-Upgrade: websocket\r\n
-Connection: Upgrade\r\n
-Host: localhost:8002\r\n
-Origin: https://developer.mozilla.org\r\n
-Pragma: no-cache\r\n
-Cache-Control: no-cache\r\n
-Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n
-Sec-WebSocket-Version: 13\r\n
-Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits,\r\n
-x-webkit-deflate-frame\r\n
-User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML,\r\n
-like Gecko) Chrome/33.0.1750.154 Safari/537.36\r\n\r\n"""
+class ChatServer(ThreadingMixIn, HTTPServer):
+    index_file = './index.html'
+    def __init__(self, address, handler_class):
+        HTTPServer.__init__(self, address, handler_class)
+        self.clients = set()
+
+    def add_client(self, client):
+        self.clients.add(client)
+        self.send_server_message('{} has joined'.format(client.username))
+
+    def send_server_message(self, message):
+        data = {
+            'type': 'notice',
+            'message': message,
+            'datetime': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        for client in self.clients:
+            client.connection.send(data)
+
+    def send_user_message(self, sent_from, message):
+        data = {
+            'type': 'user_message',
+            'message': message,
+            'username': sent_from.username,
+            'datetime': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        for client in self.clients:
+            client.connection.send(data)
+
+
+class ChatHandler(WebSocketHandler):
+    def handle_data(self, data):
+        try:
+            self.data = json.loads(data)
+        except ValueError:
+            logger.debug('data received: %s', data)
+            return
+        message_type = self.data['type']
+        fn = getattr(self, 'handle_{}'.format(message_type))
+        if fn is None:
+            logger.debug('unknown message type: %s', data.type)
+            return self.send_error_message('Invalid Message Type: {}'.format(message_type))
+        fn()
+
+    def handle_new_user(self):
+        self.client = Client(self.data['username'], self)
+        self.server.add_client(self.client)
+
+    def handle_user_message(self):
+        self.server.send_user_message(self.client, self.data['message'])
+
+    def send_error_message(self, message):
+        data = {
+            'type': 'error',
+            'message': message,
+        }
+        self.send(data)
+
 
 if __name__ == '__main__':
-    serve()
+    logging.basicConfig(level=logging.DEBUG)
+    ChatServer(('0.0.0.0', 8000), ChatHandler).serve_forever()
